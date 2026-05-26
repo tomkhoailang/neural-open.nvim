@@ -102,14 +102,15 @@ end
 
 --- Encode and write a table as JSON to disk with optional latency tracking.
 ---@param picker_name string The picker name (e.g. "files")
----@param suffix string File suffix ("" for weights, ".tracking" for tracking)
+---@param suffix string File suffix ("" for weights, ".tracking" for tracking, ".history" for history)
 ---@param data table
 ---@param latency_ctx? table Optional latency context
+---@param sync? boolean Whether to write synchronously (blocking)
 ---@return boolean success
-local function write_json(picker_name, suffix, data, latency_ctx)
+local function write_json(picker_name, suffix, data, latency_ctx, sync)
   local latency = require("neural-open.latency")
   local path = picker_path(picker_name, suffix)
-  local parent = suffix == "" and "db.save_weights" or "db.save_tracking"
+  local parent = suffix == "" and "db.save_weights" or (suffix == ".history" and "db.save_history" or "db.save_tracking")
 
   local encoded, ok = latency.measure(latency_ctx, "db.save.json_encode", function()
     return vim.json.encode(data)
@@ -125,42 +126,81 @@ local function write_json(picker_name, suffix, data, latency_ctx)
     keys = vim.tbl_count(data),
   })
 
-  local temp_path = path .. ".tmp." .. vim.fn.getpid() .. "." .. vim.loop.hrtime()
+  local uv = vim.uv or vim.loop
+  local temp_path = path .. ".tmp." .. vim.fn.getpid() .. "." .. uv.hrtime()
 
-  local write_result, write_ok = latency.measure(latency_ctx, "db.save.file_write", function()
-    local file = io.open(temp_path, "w")
-    if not file then
-      error("Failed to open temp file for writing")
+  if sync then
+    local write_result, write_ok = latency.measure(latency_ctx, "db.save.file_write", function()
+      local file = io.open(temp_path, "w")
+      if not file then
+        error("Failed to open temp file for writing")
+      end
+
+      file:write(encoded)
+      file:flush()
+      file:close()
+      return true
+    end, parent)
+
+    if not write_ok then
+      pcall(os.remove, temp_path)
+      vim.notify("neural-open: Failed to write data: " .. tostring(write_result), vim.log.levels.ERROR)
+      return false
     end
 
-    file:write(encoded)
-    file:flush()
-    file:close()
-    return true
-  end, parent)
+    local rename_result, rename_ok = latency.measure(latency_ctx, "db.save.atomic_rename", function()
+      local ok_rename = os.rename(temp_path, path)
+      if not ok_rename then
+        vim.fn.writefile({ encoded }, path)
+      end
+      return true
+    end, parent)
 
-  if not write_ok then
     pcall(os.remove, temp_path)
-    vim.notify("neural-open: Failed to write data: " .. tostring(write_result), vim.log.levels.ERROR)
-    return false
-  end
 
-  local rename_result, rename_ok = latency.measure(latency_ctx, "db.save.atomic_rename", function()
-    local ok_rename = os.rename(temp_path, path)
-    if not ok_rename then
-      vim.fn.writefile({ encoded }, path)
+    if not rename_ok then
+      vim.notify("neural-open: Failed to move file: " .. tostring(rename_result), vim.log.levels.ERROR)
+      return false
     end
+
     return true
-  end, parent)
+  else
+    -- Run the actual writing asynchronously so we don't block the main Neovim thread
+    uv.fs_open(temp_path, "w", 438, function(err, fd)
+      if err then
+        vim.schedule(function()
+          vim.notify("neural-open: Failed to open temp file asynchronously: " .. tostring(err), vim.log.levels.ERROR)
+        end)
+        return
+      end
 
-  pcall(os.remove, temp_path)
+      uv.fs_write(fd, encoded, 0, function(write_err)
+        uv.fs_close(fd, function()
+          if write_err then
+            uv.fs_unlink(temp_path, function() end)
+            vim.schedule(function()
+              vim.notify("neural-open: Failed to write temp file asynchronously: " .. tostring(write_err), vim.log.levels.ERROR)
+            end)
+            return
+          end
 
-  if not rename_ok then
-    vim.notify("neural-open: Failed to move file: " .. tostring(rename_result), vim.log.levels.ERROR)
-    return false
+          uv.fs_rename(temp_path, path, function(rename_err)
+            if rename_err then
+              uv.fs_unlink(temp_path, function() end)
+              -- Fallback: write file synchronously on the main thread
+              vim.schedule(function()
+                local ok_write = pcall(vim.fn.writefile, { encoded }, path)
+                if not ok_write then
+                  vim.notify("neural-open: Failed to rename or fallback-write file: " .. tostring(rename_err), vim.log.levels.ERROR)
+                end
+              end)
+            end
+          end)
+        end)
+      end)
+    end)
+    return true
   end
-
-  return true
 end
 
 --- Migrate tracking keys from weight file to tracking file on first access.
@@ -196,9 +236,9 @@ local function migrate_tracking(picker_name, latency_ctx)
   end
 
   -- Write tracking file first (crash safety: data in both is harmless)
-  write_json(picker_name, ".tracking", tracking, latency_ctx)
+  write_json(picker_name, ".tracking", tracking, latency_ctx, true)
   -- Re-save weights without tracking keys
-  write_json(picker_name, "", weights, latency_ctx)
+  write_json(picker_name, "", weights, latency_ctx, true)
 
   return tracking
 end
@@ -207,9 +247,10 @@ end
 ---@param picker_name string The picker name (e.g. "files")
 ---@param weights table
 ---@param latency_ctx? table Optional latency context for tracking
+---@param sync? boolean Whether to save synchronously
 ---@return boolean success
-function M.save_weights(picker_name, weights, latency_ctx)
-  return write_json(picker_name, "", weights, latency_ctx)
+function M.save_weights(picker_name, weights, latency_ctx, sync)
+  return write_json(picker_name, "", weights, latency_ctx, sync)
 end
 
 --- Get weights from disk with optional latency tracking
@@ -224,9 +265,10 @@ end
 ---@param picker_name string The picker name (e.g. "files")
 ---@param data table
 ---@param latency_ctx? table Optional latency context
+---@param sync? boolean Whether to save synchronously
 ---@return boolean success
-function M.save_tracking(picker_name, data, latency_ctx)
-  return write_json(picker_name, ".tracking", data, latency_ctx)
+function M.save_tracking(picker_name, data, latency_ctx, sync)
+  return write_json(picker_name, ".tracking", data, latency_ctx, sync)
 end
 
 --- Get tracking data from disk with optional latency tracking.
@@ -240,6 +282,24 @@ function M.get_tracking(picker_name, latency_ctx)
     tracking = migrate_tracking(picker_name, latency_ctx)
   end
   return tracking
+end
+
+--- Save training history to disk with optional latency tracking
+---@param picker_name string The picker name (e.g. "files")
+---@param data table
+---@param latency_ctx? table Optional latency context
+---@param sync? boolean Whether to save synchronously
+---@return boolean success
+function M.save_history(picker_name, data, latency_ctx, sync)
+  return write_json(picker_name, ".history", data, latency_ctx, sync)
+end
+
+--- Get training history from disk with optional latency tracking
+---@param picker_name string The picker name (e.g. "files")
+---@param latency_ctx? table Optional latency context
+---@return table history
+function M.get_history(picker_name, latency_ctx)
+  return read_json(picker_name, ".history", latency_ctx)
 end
 
 --- Reset the cached weights directory path. Used by tests to ensure clean state.

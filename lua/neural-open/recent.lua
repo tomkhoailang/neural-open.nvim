@@ -188,7 +188,8 @@ end
 
 --- Immediately persist pending touches by merging with disk and writing back.
 --- Cancels any pending debounce timer. No-op if there are no pending touches.
-function M.flush()
+---@param sync? boolean Whether to save synchronously
+function M.flush(sync)
   if #pending_touches == 0 then
     return
   end
@@ -202,7 +203,7 @@ function M.flush()
   tracking.recency_list = merged
 
   local db = require("neural-open.db")
-  db.save_tracking("files", tracking)
+  db.save_tracking("files", tracking, nil, sync)
 
   -- Clear pending state
   pending_touches = {}

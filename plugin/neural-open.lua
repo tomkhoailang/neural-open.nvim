@@ -48,7 +48,7 @@ vim.api.nvim_create_autocmd("BufEnter", {
 vim.api.nvim_create_autocmd("VimLeavePre", {
   group = "NeuralOpenRecency",
   callback = function()
-    require("neural-open.recent").flush()
+    require("neural-open.recent").flush(true)
   end,
   desc = "Persist NeuralOpen recency data on exit",
 })

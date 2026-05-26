@@ -921,6 +921,10 @@ end
 ---@param latency_ctx? table Optional latency context
 local function save_state(st, latency_ctx)
   local weights_module = require("neural-open.weights")
+  local db = require("neural-open.db")
+  local picker_name = st.config and st.config.picker_name or "files"
+
+  -- 1. Save core model weights to files.json (very small, async)
   weights_module.save_weights("nn", {
     version = "2.0-hinge",
     network = {
@@ -931,14 +935,20 @@ local function save_state(st, latency_ctx)
       running_means = st.running_means,
       running_vars = st.running_vars,
     },
-    training_history = st.training_history,
-    stats = st.stats,
-    optimizer_type = st.optimizer_type,
-    optimizer_state = st.optimizer_state,
-  }, latency_ctx, st.config and st.config.picker_name)
+  }, latency_ctx, picker_name)
+
+  -- 2. Save training history and optimizer state to files.history.json (large, async)
+  if st.training_history or st.optimizer_state then
+    db.save_history(picker_name, {
+      training_history = st.training_history,
+      stats = st.stats,
+      optimizer_type = st.optimizer_type,
+      optimizer_state = st.optimizer_state,
+    }, latency_ctx)
+  end
 end
 
---- Ensure the network state is initialized
+--- Ensure that the network weights are initialized (excludes heavy history/optimizer state)
 ---@param st table State table
 ---@param force_reload boolean? Force reload weights even if already loaded
 local function ensure_weights(st, force_reload)
@@ -955,9 +965,27 @@ local function ensure_weights(st, force_reload)
 
     if algorithm_weights then
       -- Auto-migrate from old double-nested format: { nn = { version, network, ... } }
-      -- to flat format: { version, network, ... }
       if algorithm_weights.nn and algorithm_weights.nn.network then
         algorithm_weights = algorithm_weights.nn
+      end
+
+      -- One-time auto-migration of training history & optimizer state to files.history.json
+      if algorithm_weights.training_history or algorithm_weights.optimizer_state then
+        local history_data = {
+          training_history = algorithm_weights.training_history or {},
+          stats = algorithm_weights.stats or {},
+          optimizer_type = algorithm_weights.optimizer_type,
+          optimizer_state = algorithm_weights.optimizer_state,
+        }
+        local db = require("neural-open.db")
+        db.save_history(st.config and st.config.picker_name or "files", history_data, nil, true)
+
+        algorithm_weights.training_history = nil
+        algorithm_weights.stats = nil
+        algorithm_weights.optimizer_type = nil
+        algorithm_weights.optimizer_state = nil
+
+        weights_module.save_weights("nn", algorithm_weights, nil, st.config and st.config.picker_name, true)
       end
 
       -- Load network weights (flat: algorithm_weights.network)
@@ -971,55 +999,7 @@ local function ensure_weights(st, force_reload)
       end
 
       -- Handle input-size migration: expand first layer if config expects more inputs
-      local migration = migrate_input_size(st, config, algorithm_weights.training_history)
-
-      -- Load history and stats
-      st.training_history = algorithm_weights.training_history or {}
-      if algorithm_weights.stats then
-        st.stats = vim.tbl_extend("force", st.stats, algorithm_weights.stats)
-        st.stats.batch_timings = st.stats.batch_timings or {}
-        st.stats.avg_batch_timing = st.stats.avg_batch_timing or nil
-        st.stats.loss_history = st.stats.loss_history or {}
-      end
-
-      -- Load optimizer state
-      local saved_optimizer_type = algorithm_weights.optimizer_type or "sgd"
-      local current_optimizer_type = config.optimizer or "sgd"
-
-      if saved_optimizer_type ~= current_optimizer_type then
-        -- Optimizer changed - reset optimizer state but keep network weights
-        st.optimizer_type = current_optimizer_type
-        st.optimizer_state = nil
-        vim.notify(
-          "neural-open: Optimizer changed to "
-            .. current_optimizer_type
-            .. ". Optimizer state reset, but network weights preserved.",
-          vim.log.levels.INFO
-        )
-      else
-        st.optimizer_type = saved_optimizer_type
-        st.optimizer_state = algorithm_weights.optimizer_state
-      end
-
-      -- Initialize optimizer state if needed
-      if st.optimizer_type == "adamw" and not st.optimizer_state then
-        st.optimizer_state = init_optimizer_state("adamw", config.architecture)
-      elseif st.optimizer_type == "sgd" and not st.optimizer_state then
-        st.optimizer_state = { timestep = 0 }
-      end
-
-      -- Reset first-layer optimizer moments after input-size migration.
-      -- This must run after optimizer state is loaded from disk.
-      if migration.migrated and st.optimizer_state and st.optimizer_state.moments then
-        local expected_input_size = config.architecture[1]
-        local m = st.optimizer_state.moments
-        if m.first and m.first.weights and m.first.weights[1] then
-          m.first.weights[1] = nn_core.zeros(expected_input_size, migration.output_size)
-        end
-        if m.second and m.second.weights and m.second.weights[1] then
-          m.second.weights[1] = nn_core.zeros(expected_input_size, migration.output_size)
-        end
-      end
+      local migration = migrate_input_size(st, config, nil)
 
       -- Persist migrated weights immediately so future loads don't re-trigger migration
       if migration.migrated then
@@ -1056,16 +1036,6 @@ local function ensure_weights(st, force_reload)
         -- Fallback to random initialization if defaults unavailable or architecture differs
         st.weights, st.biases, st.gammas, st.betas, st.running_means, st.running_vars =
           nn_core.init_network(config.architecture)
-      end
-      st.training_history = {}
-
-      -- Set optimizer type from config
-      st.optimizer_type = config.optimizer or "sgd"
-      if st.optimizer_type == "adamw" then
-        st.optimizer_state = init_optimizer_state("adamw", config.architecture)
-      else
-        -- SGD needs state for timestep tracking (warmup)
-        st.optimizer_state = { timestep = 0 }
       end
     end
 
@@ -1150,6 +1120,81 @@ local function calculate_score_impl(st, input_buf)
   return current[1] * 100
 end
 
+--- Ensure that the training history and optimizer state are loaded from storage.
+---@param st table State table
+local function ensure_training_state(st)
+  if not st.training_history or #st.training_history == 0 or not st.optimizer_state then
+    local db = require("neural-open.db")
+    local picker_name = st.config and st.config.picker_name or "files"
+    local history_data = db.get_history(picker_name)
+
+    if history_data and not vim.tbl_isempty(history_data) then
+      st.training_history = history_data.training_history or {}
+      st.stats = vim.tbl_extend("force", st.stats or {}, history_data.stats or {})
+      st.optimizer_state = history_data.optimizer_state
+      st.optimizer_type = history_data.optimizer_type or st.optimizer_type
+    else
+      st.training_history = {}
+    end
+  end
+
+  -- Initialize optimizer state if still needed
+  local config = ensure_config(st)
+  st.optimizer_type = config.optimizer or "sgd"
+  if st.optimizer_type == "adamw" and not st.optimizer_state then
+    st.optimizer_state = init_optimizer_state("adamw", config.architecture)
+  elseif st.optimizer_type == "sgd" and not st.optimizer_state then
+    st.optimizer_state = { timestep = 0 }
+  end
+
+  -- Defer training history input-size backfill/migration
+  if st.weights and st.weights[1] and st.training_history and #st.training_history > 0 then
+    local current_input_size = #st.weights[1]
+    local first_pair = st.training_history[1]
+    local saved_input_size = first_pair.positive_input and first_pair.positive_input[1] and #first_pair.positive_input[1]
+    if saved_input_size and saved_input_size < current_input_size then
+      local feature_names = get_feature_names(st)
+      local new_col_defaults = {}
+      local new_col_fns = {}
+      for col = saved_input_size + 1, current_input_size do
+        local default = MIGRATION_DEFAULTS[feature_names[col]]
+        if type(default) == "function" then
+          new_col_fns[col] = default
+          new_col_defaults[col] = 0.0
+        else
+          new_col_defaults[col] = default or 0.0
+        end
+      end
+      local has_fns = next(new_col_fns) ~= nil
+      local old_feature_indices = {}
+      for i = 1, saved_input_size do
+        old_feature_indices[feature_names[i]] = i
+      end
+
+      local function backfill_row(row)
+        for col = saved_input_size + 1, current_input_size do
+          if has_fns and new_col_fns[col] then
+            row[col] = new_col_fns[col](row, old_feature_indices)
+          else
+            row[col] = new_col_defaults[col]
+          end
+        end
+      end
+
+      for _, pair in ipairs(st.training_history) do
+        local pos_row = pair.positive_input and pair.positive_input[1]
+        if pos_row and #pos_row == saved_input_size then
+          backfill_row(pos_row)
+        end
+        local neg_row = pair.negative_input and pair.negative_input[1]
+        if neg_row and #neg_row == saved_input_size then
+          backfill_row(neg_row)
+        end
+      end
+    end
+  end
+end
+
 --- Implementation: Update neural network weights based on user selection
 ---@param st table State table
 ---@param selected_item NeuralOpenItem
@@ -1159,6 +1204,7 @@ local function update_weights_impl(st, selected_item, ranked_items, latency_ctx)
   local latency = require("neural-open.latency")
   local nn_training = require("neural-open.algorithms.nn_training")
   ensure_weights(st, true)
+  ensure_training_state(st)
 
   local config = ensure_config(st)
 
