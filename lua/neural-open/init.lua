@@ -130,27 +130,25 @@ local function confirm_handler(picker, item)
 
   -- Then add our custom logic (asynchronously to avoid blocking UI)
   if item and item.file then
-    -- Get the actual visible rank (position in filtered list)
-    local items, items_ok = latency.measure(timing_ctx, "confirm.get_items", function()
-      return picker:items()
-    end)
-    local visible_rank = nil
-
-    if items_ok then
-      -- Find the item's position in the filtered/sorted list
-      visible_rank = latency.measure(timing_ctx, "confirm.find_rank", function()
-        for i, list_item in ipairs(items) do
-          if list_item.file == item.file then
-            return i
-          end
-        end
-        return nil
-      end)
-    end
+    -- Capture picker items synchronously before scheduling (fast O(1) array reference lookup)
+    local items = picker:items()
 
     -- Schedule both transition recording and weight updates together to avoid race conditions
     -- Pass timing_ctx into async context (captured by closure - thread safe!)
     vim.schedule(function()
+      local visible_rank = nil
+      if items then
+        -- Find the item's position in the filtered/sorted list asynchronously
+        visible_rank = latency.measure(timing_ctx, "confirm.find_rank", function()
+          for i, list_item in ipairs(items) do
+            if list_item.file == item.file then
+              return i
+            end
+          end
+          return nil
+        end)
+      end
+
       -- Record transition for future scoring (source_file -> destination_file)
       if item.nos and item.nos.ctx then
         local source_file = item.nos.ctx.current_file
