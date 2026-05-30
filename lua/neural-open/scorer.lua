@@ -3,6 +3,12 @@ local M = {}
 local math_exp = math.exp
 local trigrams = require("neural-open.trigrams")
 
+local virtual_name_cache = {}
+local proximity_cache = {}
+local last_proximity_dir = nil
+local trigram_cache = {}
+local last_trigram_file = nil
+
 --- Canonical feature names in input buffer order (shared by all algorithms)
 M.FEATURE_NAMES = {
   "match",
@@ -125,15 +131,24 @@ end
 ---@param special_files table<string, boolean>? Table of special filenames
 ---@return string Virtual name for display/matching
 function M.get_virtual_name(path, special_files)
+  local cached = virtual_name_cache[path]
+  if cached then
+    return cached
+  end
   local filename = path:match("[^/]+$") or path
+  local res
   if not special_files or not special_files[filename] then
-    return filename
+    res = filename
+  else
+    local parent = path:match("([^/]+)/[^/]+$")
+    if parent and parent ~= "" then
+      res = parent .. "/" .. filename
+    else
+      res = filename
+    end
   end
-  local parent = path:match("([^/]+)/[^/]+$")
-  if parent and parent ~= "" then
-    return parent .. "/" .. filename
-  end
-  return filename
+  virtual_name_cache[path] = res
+  return res
 end
 
 --- Update the cached recency list size from config
@@ -195,7 +210,18 @@ function M.compute_static_raw_features(
     current_dir, current_depth = M.compute_dir_info(context.current_file)
   end
   if current_dir then
-    raw_features.proximity = calculate_proximity(current_dir, current_depth, normalized_path)
+    if current_dir ~= last_proximity_dir then
+      proximity_cache = {}
+      last_proximity_dir = current_dir
+    end
+    local cached = proximity_cache[normalized_path]
+    if cached then
+      raw_features.proximity = cached
+    else
+      local score = calculate_proximity(current_dir, current_depth, normalized_path)
+      proximity_cache[normalized_path] = score
+      raw_features.proximity = score
+    end
   end
 
   -- Check if in project
@@ -205,8 +231,18 @@ function M.compute_static_raw_features(
 
   -- Calculate trigram similarity if current file trigrams are available
   if context.current_file_trigrams and virtual_name then
-    raw_features.trigram =
-      trigrams.dice_coefficient_direct(context.current_file_trigrams, context.current_file_trigrams_size, virtual_name)
+    if context.current_file ~= last_trigram_file then
+      trigram_cache = {}
+      last_trigram_file = context.current_file
+    end
+    local cached = trigram_cache[virtual_name]
+    if cached then
+      raw_features.trigram = cached
+    else
+      local score = trigrams.dice_coefficient_direct(context.current_file_trigrams, context.current_file_trigrams_size, virtual_name)
+      trigram_cache[virtual_name] = score
+      raw_features.trigram = score
+    end
   end
 
   -- Lookup precomputed transition score
