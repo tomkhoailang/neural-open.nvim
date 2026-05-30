@@ -379,6 +379,8 @@ function M._pin_git_files(inner, git_root)
   end
 end
 
+local git_root_cache = {}
+
 -- Helper function to get neural-open source configuration
 local function get_neural_source_config()
   return {
@@ -393,15 +395,22 @@ local function get_neural_source_config()
       local multi_sources = M.config.file_sources
       -- Detect git repo and capture its root in a single call
       -- (handles worktrees, GIT_DIR, submodules; fails for bare repos, which is fine)
-      local git_root = nil
-      if vim.fn.executable("git") == 1 then
-        local output = vim.fn.system({ "git", "rev-parse", "--show-toplevel" })
-        if vim.v.shell_error == 0 then
-          local trimmed = vim.trim(output)
-          if trimmed ~= "" then
-            git_root = trimmed
+      local dir = (opts and opts.cwd) or (ctx and ctx.opts and ctx.opts.cwd) or vim.fn.getcwd()
+      local git_root = git_root_cache[dir]
+      if git_root == nil then
+        if vim.fn.executable("git") == 1 then
+          local output = vim.fn.system({ "git", "-C", dir, "rev-parse", "--show-toplevel" })
+          if vim.v.shell_error == 0 then
+            local trimmed = vim.trim(output)
+            if trimmed ~= "" then
+              git_root = trimmed
+            end
           end
         end
+        git_root_cache[dir] = git_root or false
+      end
+      if git_root == false then
+        git_root = nil
       end
       local finders = {}
 
