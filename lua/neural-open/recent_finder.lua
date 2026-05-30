@@ -35,22 +35,31 @@ function M.finder(_opts, _ctx)
   if frecency_ok then
     local inst_ok, frecency_inst = pcall(snacks_frecency.new)
     if inst_ok and frecency_inst and frecency_inst.cache then
-      -- Collect and sort by score descending
+      -- Collect raw paths and sort by score descending first (avoids upfront path normalization)
       local frecent = {}
       for raw_path, deadline in pairs(frecency_inst.cache) do
         local score = frecency_inst:to_score(deadline)
         if score > 0 then
-          frecent[#frecent + 1] = { path = path_mod.normalize(raw_path), score = score }
+          frecent[#frecent + 1] = { raw_path = raw_path, score = score }
         end
       end
       table.sort(frecent, function(a, b)
         return a.score > b.score
       end)
 
+      -- Normalize and verify existence for only the top 100 highest scoring items
+      local added_count = 0
       for _, entry in ipairs(frecent) do
-        if not seen[entry.path] and vim.uv.fs_stat(entry.path) then
-          seen[entry.path] = true
-          items[#items + 1] = { file = entry.path, text = entry.path }
+        if added_count >= 100 then
+          break
+        end
+        local normalized = path_mod.normalize(entry.raw_path)
+        if not seen[normalized] then
+          if vim.uv.fs_stat(normalized) then
+            seen[normalized] = true
+            items[#items + 1] = { file = normalized, text = normalized }
+            added_count = added_count + 1
+          end
         end
       end
     end

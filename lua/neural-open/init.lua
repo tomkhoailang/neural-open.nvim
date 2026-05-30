@@ -416,7 +416,7 @@ local function get_neural_source_config()
 
       for _, source_name in ipairs(multi_sources) do
         if source_name ~= "git_files" or git_root then
-          local source_config = vim.deepcopy(snacks.picker.sources[source_name])
+          local source_config = snacks.picker.sources[source_name]
           local finder = require("snacks.picker.config").finder(source_config.finder)
           if source_name == "git_files" then
             finder = M._pin_git_files(finder, assert(git_root))
