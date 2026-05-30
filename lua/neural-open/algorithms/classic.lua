@@ -265,6 +265,7 @@ local function debug_view_impl(cs, item, all_items)
     table.insert(lines, "")
 
     -- Features table (raw + normalized)
+    scorer.get_or_create_raw_features(item)
     local all_features = cs.config.feature_names or scorer.FEATURE_NAMES
     local normalized_features = {}
     if item.nos.input_buf then

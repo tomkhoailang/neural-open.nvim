@@ -171,16 +171,17 @@ function M.calculate_recency_score(recent_rank, max_items)
   return (max_items - recent_rank + 1) / max_items
 end
 
---- Compute static raw features that don't depend on the search query
---- These are computed once per item during the transform phase
+--- Populate pre-allocated input_buf with normalized static features.
+--- This runs in zero memory allocations.
+---@param input_buf number[] The flat pre-allocated array of 11 normalized features
 ---@param normalized_path string The normalized absolute path
----@param context NosContext The shared session context
+---@param context table The shared session context
 ---@param is_open_buffer boolean Whether the file is open in a buffer
 ---@param is_alternate boolean Whether the file is the alternate buffer
 ---@param recent_rank number? Position in recent files (1-based)
 ---@param virtual_name string? Virtual name for special files
----@return NosRawFeatures
-function M.compute_static_raw_features(
+function M.fill_static_features(
+  input_buf,
   normalized_path,
   context,
   is_open_buffer,
@@ -188,19 +189,8 @@ function M.compute_static_raw_features(
   recent_rank,
   virtual_name
 )
-  local raw_features = {
-    match = 0, -- Will be set in on_match_handler
-    virtual_name = 0, -- Will be set in on_match_handler
-    frecency = 0, -- Will be set in on_match_handler from Snacks
-    open = is_open_buffer and 1 or 0,
-    alt = is_alternate and 1 or 0,
-    proximity = 0,
-    project = 0,
-    recency = recent_rank or 0,
-    trigram = 0,
-    transition = 0,
-    not_current = (normalized_path == context.current_file) and 0 or 1,
-  }
+  input_buf[4] = is_open_buffer and 1 or 0
+  input_buf[5] = is_alternate and 1 or 0
 
   -- Calculate proximity using precomputed directory context (fast path)
   -- Falls back to deriving from current_file when precomputed values aren't available
@@ -209,6 +199,7 @@ function M.compute_static_raw_features(
   if not current_dir and context.current_file and context.current_file ~= "" then
     current_dir, current_depth = M.compute_dir_info(context.current_file)
   end
+  local proximity = 0
   if current_dir then
     if current_dir ~= last_proximity_dir then
       proximity_cache = {}
@@ -216,20 +207,30 @@ function M.compute_static_raw_features(
     end
     local cached = proximity_cache[normalized_path]
     if cached then
-      raw_features.proximity = cached
+      proximity = cached
     else
-      local score = calculate_proximity(current_dir, current_depth, normalized_path)
-      proximity_cache[normalized_path] = score
-      raw_features.proximity = score
+      proximity = calculate_proximity(current_dir, current_depth, normalized_path)
+      proximity_cache[normalized_path] = proximity
     end
   end
+  input_buf[6] = proximity
 
   -- Check if in project
+  local project = 0
   if context.cwd and normalized_path:find(context.cwd, 1, true) == 1 then
-    raw_features.project = 1
+    project = 1
   end
+  input_buf[7] = project
+
+  -- Calculate recency
+  local recency_val = 0
+  if recent_rank and recent_rank > 0 then
+    recency_val = M.calculate_recency_score(recent_rank)
+  end
+  input_buf[8] = recency_val
 
   -- Calculate trigram similarity if current file trigrams are available
+  local trigram = 0
   if context.current_file_trigrams and virtual_name then
     if context.current_file ~= last_trigram_file then
       trigram_cache = {}
@@ -237,20 +238,72 @@ function M.compute_static_raw_features(
     end
     local cached = trigram_cache[virtual_name]
     if cached then
-      raw_features.trigram = cached
+      trigram = cached
     else
-      local score = trigrams.dice_coefficient_direct(context.current_file_trigrams, context.current_file_trigrams_size, virtual_name)
-      trigram_cache[virtual_name] = score
-      raw_features.trigram = score
+      trigram = trigrams.dice_coefficient_direct(context.current_file_trigrams, context.current_file_trigrams_size, virtual_name)
+      trigram_cache[virtual_name] = trigram
     end
   end
+  input_buf[9] = trigram
 
   -- Lookup precomputed transition score
+  local transition = 0
   if context.transition_scores then
-    raw_features.transition = context.transition_scores[normalized_path] or 0
+    transition = context.transition_scores[normalized_path] or 0
   end
+  input_buf[10] = transition
 
-  return raw_features
+  -- Not current file
+  input_buf[11] = (normalized_path == context.current_file) and 0 or 1
+end
+
+--- Get or lazy-reconstruct raw_features for debug or display purposes
+---@param item NeuralOpenItem The item to get raw features for
+---@return table? Raw features table
+function M.get_or_create_raw_features(item)
+  if not item or not item.nos then return nil end
+  if item.nos.raw_features then
+    return item.nos.raw_features
+  end
+  local input_buf = item.nos.input_buf
+  if not input_buf then return nil end
+
+  local raw = {
+    open = input_buf[4],
+    alt = input_buf[5],
+    proximity = input_buf[6],
+    project = input_buf[7],
+    recency = item.nos.recent_rank or 0,
+    trigram = input_buf[9],
+    transition = input_buf[10],
+    not_current = input_buf[11],
+  }
+  item.nos.raw_features = raw
+  return raw
+end
+
+--- Compute static raw features that don't depend on the search query
+--- (Deprecated: kept for backward compatibility, internally uses fill_static_features)
+function M.compute_static_raw_features(
+  normalized_path,
+  context,
+  is_open_buffer,
+  is_alternate,
+  recent_rank,
+  virtual_name
+)
+  local buf = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+  M.fill_static_features(buf, normalized_path, context, is_open_buffer, is_alternate, recent_rank, virtual_name)
+  return {
+    open = buf[4],
+    alt = buf[5],
+    proximity = buf[6],
+    project = buf[7],
+    recency = recent_rank or 0,
+    trigram = buf[9],
+    transition = buf[10],
+    not_current = buf[11],
+  }
 end
 
 --- Normalize a match or virtual_name score to [0,1] using sigmoid
@@ -307,15 +360,34 @@ function M.on_match_handler(matcher, item)
     return
   end
 
-  -- Ensure raw_features exists (should be initialized in transform)
-  if not item.nos.raw_features then
-    return
-  end
-
   -- Get algorithm from context (already loaded in capture_context)
   local nos_ctx = item.nos.ctx
   if not nos_ctx or not nos_ctx.algorithm then
     return
+  end
+
+  -- Lazy feature extraction and input_buf allocation (Idea 2)
+  local input_buf = item.nos.input_buf
+  if not input_buf then
+    input_buf = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    item.nos.input_buf = input_buf
+
+    local normalized_path = item.nos.normalized_path
+    local virtual_name = item.nos.virtual_name
+    local is_open_buffer = item.buf ~= nil
+    local is_alternate = item.buf ~= nil and item.buf == nos_ctx.alternate_buf
+    local recent_files = nos_ctx.recent_files or {}
+    local recent_rank = recent_files[normalized_path] and recent_files[normalized_path].recent_rank or nil
+
+    M.fill_static_features(
+      input_buf,
+      normalized_path,
+      nos_ctx,
+      is_open_buffer,
+      is_alternate,
+      recent_rank,
+      virtual_name
+    )
   end
 
   local algorithm = nos_ctx.algorithm
@@ -346,20 +418,14 @@ function M.on_match_handler(matcher, item)
     raw_match_score = matcher:match(_temp_item) or 0
   end
 
-  -- Update dynamic raw features
-  item.nos.raw_features.match = raw_match_score
-  item.nos.raw_features.virtual_name = raw_virtual_name_score
+  -- Update dynamic features and score
+  input_buf[1] = M.normalize_match_score(raw_match_score)
+  input_buf[2] = M.normalize_match_score(raw_virtual_name_score)
 
   -- Capture frecency from Snacks.nvim (it sets this during matching)
   local frecency_value = item.frecency or 0
-  item.nos.raw_features.frecency = frecency_value
-
-  -- Update pre-allocated input_buf with dynamic features and score
-  -- (zero table allocation per keystroke for all algorithms)
-  local input_buf = item.nos.input_buf
-  input_buf[1] = M.normalize_match_score(raw_match_score)
-  input_buf[2] = M.normalize_match_score(raw_virtual_name_score)
   input_buf[3] = M.normalize_frecency(frecency_value)
+
   local total_weighted_score = algorithm.calculate_score(input_buf)
   item.nos.neural_score = total_weighted_score
   item.score = total_weighted_score

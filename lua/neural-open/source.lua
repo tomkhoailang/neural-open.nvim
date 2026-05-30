@@ -122,73 +122,16 @@ function M.create_neural_transform(config, scorer, opts)
 
     -- Get safely captured context from finder (no vim API calls in async context)
     local nos_ctx = ctx.meta.nos_ctx or {}
-    local recent_files = nos_ctx.recent_files or {}
-    local alternate_buf = nos_ctx.alternate_buf
 
-    local is_open_buffer = item.buf ~= nil
-    local is_alternate = item.buf ~= nil and item.buf == alternate_buf
-
-    -- Get recent file info
-    local recent_rank = nil
-    if recent_files[normalized_path] then
-      recent_rank = recent_files[normalized_path].recent_rank
-    end
-
-    -- Compute virtual name for special files
+    -- Compute virtual name for special files (cached at the scorer level)
     local virtual_name = scorer.get_virtual_name(normalized_path, config.special_files)
 
-    -- Compute static raw features once during transform
-    local raw_features = scorer.compute_static_raw_features(
-      normalized_path,
-      nos_ctx,
-      is_open_buffer,
-      is_alternate,
-      recent_rank,
-      virtual_name
-    )
-
-    -- Pre-allocate input_buf with normalized static features for all algorithms.
-    -- Dynamic features (match, virtual_name, frecency) are filled per-keystroke in on_match_handler.
-    local recency_val = 0
-    if recent_rank and recent_rank > 0 then
-      recency_val = scorer.calculate_recency_score(recent_rank)
-    end
-    local input_buf = {
-      0, -- [1] match (dynamic)
-      0, -- [2] virtual_name (dynamic)
-      0, -- [3] frecency (dynamic)
-      is_open_buffer and 1 or 0, -- [4] open
-      is_alternate and 1 or 0, -- [5] alt
-      raw_features.proximity, -- [6] proximity (already [0,1])
-      raw_features.project, -- [7] project (already 0/1)
-      recency_val, -- [8] recency (normalized)
-      raw_features.trigram, -- [9] trigram (already [0,1])
-      raw_features.transition, -- [10] transition (already [0,1])
-      raw_features.not_current, -- [11] not_current (already binary)
-    }
-
-    -- Initialize the nos field structure with all per-item data
+    -- Initialize the nos field structure with only the essential identifier fields
+    -- Features are computed lazily in on_match_handler (zero upfront overhead per item)
     item.nos = {
-      -- Path data
       normalized_path = normalized_path,
       virtual_name = virtual_name,
-
-      -- Buffer status
-      is_open_buffer = is_open_buffer,
-      is_alternate = is_alternate,
-
-      -- Recent file data
-      recent_rank = recent_rank,
-
-      -- Pre-allocated flat input buffer for all algorithms
-      input_buf = input_buf,
-
-      -- Reference to shared context
       ctx = nos_ctx,
-
-      -- Raw features (will be updated per-keystroke for dynamic features)
-      raw_features = raw_features,
-      neural_score = 0,
     }
 
     return item

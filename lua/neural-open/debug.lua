@@ -422,6 +422,8 @@ function M.debug_preview(ctx)
     return
   end
 
+  require("neural-open.scorer").get_or_create_raw_features(item)
+
   fmt.setup_highlights()
   ctx.preview:reset()
   ctx.preview:minimal()
