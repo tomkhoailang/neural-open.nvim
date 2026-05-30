@@ -12,6 +12,17 @@ local cache = {}
 local cwd_cache = {}
 local last_cwd = nil
 
+local function is_normalized(p)
+  if p:find("\\") or p:find("//") or p:find("/%.%/") or p:find("/%.%.$") or p:find("/%.$") or p:find("/%.%.%/") then
+    return false
+  end
+  local len = #p
+  if len > 1 and p:sub(len, len) == "/" then
+    return false
+  end
+  return true
+end
+
 ---@param path string
 ---@return string
 function M.normalize(path)
@@ -20,7 +31,12 @@ function M.normalize(path)
     if cached then
       return cached
     end
-    local res = vim.fs.normalize(path, _normalize_opts)
+    local res
+    if is_normalized(path) then
+      res = path
+    else
+      res = vim.fs.normalize(path, _normalize_opts)
+    end
     cache[path] = res
     return res
   else
