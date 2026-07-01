@@ -488,6 +488,10 @@ function M.open(opts)
   snacks.picker.pick("neural_open", opts)
 end
 
+function M.open_fzf(opts)
+  require("neural-open.fzf").files(opts)
+end
+
 --- Register a picker configuration for later use.
 ---@param name string Picker name (used for weight file namespacing)
 ---@param config NosPickerConfig Picker configuration
