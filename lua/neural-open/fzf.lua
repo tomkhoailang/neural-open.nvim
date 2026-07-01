@@ -167,7 +167,8 @@ function M.files(opts)
           }
 
           -- Run scorer to populate input_buf features
-          local mock_matcher = {
+          local mock_matcher
+          mock_matcher = {
             pattern = fzf_opts.last_query or "",
             match = function(_, it)
               local text = it.text or ""
