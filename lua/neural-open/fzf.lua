@@ -6,6 +6,13 @@ local source_mod = require("neural-open.source")
 local recent = require("neural-open.recent")
 local transitions = require("neural-open.transitions")
 
+local function is_in_cwd(path, cwd)
+  if path == cwd then
+    return true
+  end
+  return path:sub(1, #cwd + 1) == cwd .. "/"
+end
+
 function M.files(opts)
   opts = opts or {}
   local fzf = require("fzf-lua")
@@ -24,6 +31,9 @@ function M.files(opts)
   local alternate_buf = vim.fn.bufname("#")
   if alternate_buf ~= "" then
     alternate_buf = path_mod.normalize(alternate_buf)
+    if not is_in_cwd(alternate_buf, cwd) then
+      alternate_buf = ""
+    end
   end
 
   -- Open buffers
@@ -32,7 +42,10 @@ function M.files(opts)
     if vim.api.nvim_buf_is_loaded(bufnr) then
       local name = vim.api.nvim_buf_get_name(bufnr)
       if name and name ~= "" then
-        table.insert(open_bufs, path_mod.normalize(name))
+        local norm = path_mod.normalize(name)
+        if is_in_cwd(norm, cwd) then
+          table.insert(open_bufs, norm)
+        end
       end
     end
   end
@@ -46,7 +59,9 @@ function M.files(opts)
   end
   table.sort(sorted_mru, function(a, b) return a.rank < b.rank end)
   for _, item in ipairs(sorted_mru) do
-    table.insert(mru_list, item.path)
+    if is_in_cwd(item.path, cwd) then
+      table.insert(mru_list, item.path)
+    end
   end
 
   -- Transitions
@@ -56,7 +71,9 @@ function M.files(opts)
   end
   local trans_list = {}
   for path, score in pairs(transition_scores) do
-    table.insert(trans_list, path .. ":" .. tostring(score))
+    if is_in_cwd(path, cwd) then
+      table.insert(trans_list, path .. ":" .. tostring(score))
+    end
   end
 
   -- Frecency (from Snacks)
@@ -67,9 +84,12 @@ function M.files(opts)
     if inst_ok and frecency_inst and frecency_inst.cache then
       local frecency_mod = require("neural-open.frecency")
       for path, deadline in pairs(frecency_inst.cache) do
-        local raw = frecency_inst:to_score(deadline)
-        local norm = frecency_mod.normalize_transition(raw, 8)
-        table.insert(frec_list, path .. ":" .. tostring(norm))
+        local norm_path = path_mod.normalize(path)
+        if is_in_cwd(norm_path, cwd) then
+          local raw = frecency_inst:to_score(deadline)
+          local norm = frecency_mod.normalize_transition(raw, 8)
+          table.insert(frec_list, norm_path .. ":" .. tostring(norm))
+        end
       end
     end
   end
