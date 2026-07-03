@@ -125,6 +125,121 @@ function M.files(opts)
   vim.fn.mkdir(weights_dir, "p")
 
   -- 4. Launch FZF
+  local function handle_file_action(selected, fzf_opts, open_cmd)
+    if not selected or #selected == 0 then return end
+    
+    -- Parse selection
+    local clean_sel = selected[1]:gsub("\x1b%[[%d;]*m", "")
+    local filename, dir = clean_sel:match("^[^ ]+  (.+)  (.-)$")
+    local selected_file
+    if filename then
+      dir = dir:gsub("%s+$", "")
+      selected_file = dir ~= "" and (dir .. "/" .. filename) or filename
+    else
+      selected_file = clean_sel
+    end
+
+    local abs_selected_file = vim.fn.fnamemodify(selected_file, ":p")
+    abs_selected_file = path_mod.normalize(abs_selected_file)
+
+    -- Edit the file
+    vim.cmd(open_cmd .. " " .. vim.fn.fnameescape(abs_selected_file))
+
+    -- 5. Record selection & Train neural network
+    vim.schedule(function()
+      if current_file ~= "" then
+        transitions.record_transition(current_file, abs_selected_file)
+      end
+
+      local item_tracking = require("neural-open.item_tracking")
+      item_tracking.record_selection("files", abs_selected_file, cwd)
+
+      local registry = require("neural-open.algorithms.registry")
+      local algorithm = registry.get_algorithm()
+      algorithm.load_weights()
+
+      -- Build mock positive item
+      local selected_item = {
+        file = abs_selected_file,
+        nos = {
+          normalized_path = abs_selected_file,
+          virtual_name = scorer.get_virtual_name(abs_selected_file, config.special_files),
+          ctx = {
+            recent_files = recent_map,
+            alternate_buf = alternate_buf,
+            cwd = cwd,
+            current_file = current_file,
+            current_file_dir = filepath_dir(current_file),
+            current_file_depth = count_slashes(current_file),
+            algorithm = algorithm,
+            transition_scores = transition_scores,
+          }
+        }
+      }
+
+      -- Run scorer to populate input_buf features
+      local mock_matcher
+      mock_matcher = {
+        pattern = fzf_opts.last_query or "",
+        match = function(_, it)
+          local text = it.text or ""
+          if mock_matcher.pattern == "" then
+            return 1000
+          end
+          if text:lower():find(mock_matcher.pattern:lower(), 1, true) then
+            return 3000
+          end
+          return 0
+        end
+      }
+      scorer.on_match_handler(mock_matcher, selected_item)
+
+      -- Collect negative samples to train
+      local ranked_items = { selected_item }
+      local count = 1
+      for _, recent_path in ipairs(mru_list) do
+        if recent_path ~= abs_selected_file and count < 11 then
+          local neg_item = {
+            file = recent_path,
+            nos = {
+              normalized_path = recent_path,
+              virtual_name = scorer.get_virtual_name(recent_path, config.special_files),
+              ctx = selected_item.nos.ctx
+            }
+          }
+          scorer.on_match_handler(mock_matcher, neg_item)
+          table.insert(ranked_items, neg_item)
+          count = count + 1
+        end
+      end
+
+      pcall(algorithm.update_weights, selected_item, ranked_items)
+    end)
+  end
+
+  local function copy_path_action(selected, relative)
+    if not selected or #selected == 0 then return end
+    local clean_sel = selected[1]:gsub("\x1b%[[%d;]*m", "")
+    local filename, dir = clean_sel:match("^[^ ]+  (.+)  (.-)$")
+    local selected_file
+    if filename then
+      dir = dir:gsub("%s+$", "")
+      selected_file = dir ~= "" and (dir .. "/" .. filename) or filename
+    else
+      selected_file = clean_sel
+    end
+    local abs_selected_file = vim.fn.fnamemodify(selected_file, ":p")
+    abs_selected_file = path_mod.normalize(abs_selected_file)
+    local target = abs_selected_file
+    if relative then
+      target = vim.fn.fnamemodify(abs_selected_file, ":.")
+    end
+    vim.fn.setreg("+", target)
+    vim.notify("Copied path: " .. target)
+    return require("fzf-lua").actions.resume
+  end
+
+  -- 4. Launch FZF
   fzf.fzf_exec(cmd, {
     prompt = "Neural Open> ",
     fzf_bin = fzf_bin,
@@ -135,96 +250,29 @@ function M.files(opts)
     },
     actions = {
       ["default"] = function(selected, fzf_opts)
-        if not selected or #selected == 0 then return end
-        
-        -- Parse selection
-        local clean_sel = selected[1]:gsub("\x1b%[[%d;]*m", "")
-        local filename, dir = clean_sel:match("^[^ ]+  (.+)  (.-)$")
-        local selected_file
-        if filename then
-          dir = dir:gsub("%s+$", "")
-          selected_file = dir ~= "" and (dir .. "/" .. filename) or filename
-        else
-          selected_file = clean_sel
-        end
-
-        local abs_selected_file = vim.fn.fnamemodify(selected_file, ":p")
-        abs_selected_file = path_mod.normalize(abs_selected_file)
-
-        -- Edit the file
-        vim.cmd("edit " .. vim.fn.fnameescape(abs_selected_file))
-
-        -- 5. Record selection & Train neural network
-        vim.schedule(function()
-          if current_file ~= "" then
-            transitions.record_transition(current_file, abs_selected_file)
-          end
-
-          local item_tracking = require("neural-open.item_tracking")
-          item_tracking.record_selection("files", abs_selected_file, cwd)
-
-          local registry = require("neural-open.algorithms.registry")
-          local algorithm = registry.get_algorithm()
-          algorithm.load_weights()
-
-          -- Build mock positive item
-          local selected_item = {
-            file = abs_selected_file,
-            nos = {
-              normalized_path = abs_selected_file,
-              virtual_name = scorer.get_virtual_name(abs_selected_file, config.special_files),
-              ctx = {
-                recent_files = recent_map,
-                alternate_buf = alternate_buf,
-                cwd = cwd,
-                current_file = current_file,
-                current_file_dir = filepath_dir(current_file),
-                current_file_depth = count_slashes(current_file),
-                algorithm = algorithm,
-                transition_scores = transition_scores,
-              }
-            }
-          }
-
-          -- Run scorer to populate input_buf features
-          local mock_matcher
-          mock_matcher = {
-            pattern = fzf_opts.last_query or "",
-            match = function(_, it)
-              local text = it.text or ""
-              if mock_matcher.pattern == "" then
-                return 1000
-              end
-              if text:lower():find(mock_matcher.pattern:lower(), 1, true) then
-                return 3000
-              end
-              return 0
-            end
-          }
-          scorer.on_match_handler(mock_matcher, selected_item)
-
-          -- Collect negative samples to train
-          local ranked_items = { selected_item }
-          local count = 1
-          for _, recent_path in ipairs(mru_list) do
-            if recent_path ~= abs_selected_file and count < 11 then
-              local neg_item = {
-                file = recent_path,
-                nos = {
-                  normalized_path = recent_path,
-                  virtual_name = scorer.get_virtual_name(recent_path, config.special_files),
-                  ctx = selected_item.nos.ctx
-                }
-              }
-              scorer.on_match_handler(mock_matcher, neg_item)
-              table.insert(ranked_items, neg_item)
-              count = count + 1
-            end
-          end
-
-          pcall(algorithm.update_weights, selected_item, ranked_items)
-        end)
-      end
+        handle_file_action(selected, fzf_opts, "edit")
+      end,
+      ["ctrl-s"] = function(selected, fzf_opts)
+        handle_file_action(selected, fzf_opts, "split")
+      end,
+      ["ctrl-v"] = function(selected, fzf_opts)
+        handle_file_action(selected, fzf_opts, "vsplit")
+      end,
+      ["ctrl-t"] = function(selected, fzf_opts)
+        handle_file_action(selected, fzf_opts, "tabedit")
+      end,
+      ["alt-i"] = function(selected, fzf_opts)
+        handle_file_action(selected, fzf_opts, "split")
+      end,
+      ["alt-o"] = function(selected, fzf_opts)
+        handle_file_action(selected, fzf_opts, "vsplit")
+      end,
+      ["ctrl-alt-x"] = function(selected)
+        return copy_path_action(selected, false)
+      end,
+      ["ctrl-alt-c"] = function(selected)
+        return copy_path_action(selected, true)
+      end,
     }
   })
 end
