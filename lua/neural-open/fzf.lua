@@ -249,7 +249,7 @@ function M.files(opts)
       ["--ansi"] = "",
       ["--algo"] = "frizbee",
       ["--bind"] = "alt-n:next-history,alt-p:prev-history",
-      ["--history"] = vim.fn.stdpath("data") .. "/fzf-lua-neural-open-history",
+      ["--history"] = vim.fn.stdpath("data") .. "/fzf-lua-hybrid-files-history",
     },
     actions = {
       ["default"] = function(selected, fzf_opts)
