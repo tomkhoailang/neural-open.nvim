@@ -480,6 +480,31 @@ function M.setup(opts)
     M._initialized = false
     ensure_initialized()
   end
+
+  -- Warm up the database and weights cache asynchronously during idle time after startup
+  vim.schedule(function()
+    pcall(function()
+      local db = require("neural-open.db")
+      db.get_tracking("files")
+      local registry = require("neural-open.algorithms.registry")
+      local algorithm = registry.get_algorithm()
+      algorithm.load_weights()
+
+      -- Pre-load fzf-lua modules to avoid load latency on first open
+      local fzf_ok, fzf = pcall(require, "fzf-lua")
+      if fzf_ok then
+        pcall(require, "fzf-lua.core")
+        pcall(require, "fzf-lua.winopts")
+        pcall(require, "fzf-lua.actions")
+      end
+
+      -- Pre-load Snacks frecency SQLite connection
+      local frec_ok, snacks_frecency = pcall(require, "snacks.picker.core.frecency")
+      if frec_ok then
+        pcall(snacks_frecency.new)
+      end
+    end)
+  end)
 end
 
 function M.open(opts)

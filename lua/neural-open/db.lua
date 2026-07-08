@@ -1,6 +1,9 @@
 local M = {}
 
 local cached_weights_dir = nil
+local weights_cache = {}
+local tracking_cache = {}
+local history_cache = {}
 
 --- Resolve and cache the weights directory path.
 --- Precedence: 1) weights_dir  2) dirname(weights_path)  3) default
@@ -237,8 +240,11 @@ local function migrate_tracking(picker_name, latency_ctx)
 
   -- Write tracking file first (crash safety: data in both is harmless)
   write_json(picker_name, ".tracking", tracking, latency_ctx, true)
+  tracking_cache[picker_name] = tracking
+  
   -- Re-save weights without tracking keys
   write_json(picker_name, "", weights, latency_ctx, true)
+  weights_cache[picker_name] = weights
 
   return tracking
 end
@@ -250,6 +256,7 @@ end
 ---@param sync? boolean Whether to save synchronously
 ---@return boolean success
 function M.save_weights(picker_name, weights, latency_ctx, sync)
+  weights_cache[picker_name] = weights
   return write_json(picker_name, "", weights, latency_ctx, sync)
 end
 
@@ -258,7 +265,12 @@ end
 ---@param latency_ctx? table Optional latency context
 ---@return table weights
 function M.get_weights(picker_name, latency_ctx)
-  return read_json(picker_name, "", latency_ctx)
+  if weights_cache[picker_name] then
+    return weights_cache[picker_name]
+  end
+  local data = read_json(picker_name, "", latency_ctx)
+  weights_cache[picker_name] = data
+  return data
 end
 
 --- Save tracking data to disk with optional latency tracking
@@ -268,6 +280,7 @@ end
 ---@param sync? boolean Whether to save synchronously
 ---@return boolean success
 function M.save_tracking(picker_name, data, latency_ctx, sync)
+  tracking_cache[picker_name] = data
   return write_json(picker_name, ".tracking", data, latency_ctx, sync)
 end
 
@@ -277,10 +290,14 @@ end
 ---@param latency_ctx? table Optional latency context
 ---@return table tracking
 function M.get_tracking(picker_name, latency_ctx)
+  if tracking_cache[picker_name] then
+    return tracking_cache[picker_name]
+  end
   local tracking = read_json(picker_name, ".tracking", latency_ctx)
   if vim.tbl_isempty(tracking) then
     tracking = migrate_tracking(picker_name, latency_ctx)
   end
+  tracking_cache[picker_name] = tracking
   return tracking
 end
 
@@ -291,6 +308,7 @@ end
 ---@param sync? boolean Whether to save synchronously
 ---@return boolean success
 function M.save_history(picker_name, data, latency_ctx, sync)
+  history_cache[picker_name] = data
   return write_json(picker_name, ".history", data, latency_ctx, sync)
 end
 
@@ -299,12 +317,20 @@ end
 ---@param latency_ctx? table Optional latency context
 ---@return table history
 function M.get_history(picker_name, latency_ctx)
-  return read_json(picker_name, ".history", latency_ctx)
+  if history_cache[picker_name] then
+    return history_cache[picker_name]
+  end
+  local history = read_json(picker_name, ".history", latency_ctx)
+  history_cache[picker_name] = history
+  return history
 end
 
 --- Reset the cached weights directory path. Used by tests to ensure clean state.
 function M.reset_cache()
   cached_weights_dir = nil
+  weights_cache = {}
+  tracking_cache = {}
+  history_cache = {}
 end
 
 return M

@@ -84,8 +84,8 @@ function M.files(opts)
     if inst_ok and frecency_inst and frecency_inst.cache then
       local frecency_mod = require("neural-open.frecency")
       for path, deadline in pairs(frecency_inst.cache) do
-        local norm_path = path_mod.normalize(path)
-        if is_in_cwd(norm_path, cwd) then
+        if is_in_cwd(path, cwd) then
+          local norm_path = path_mod.normalize(path)
           local raw = frecency_inst:to_score(deadline)
           local norm = frecency_mod.normalize_transition(raw, 8)
           table.insert(frec_list, norm_path .. ":" .. tostring(norm))
