@@ -110,6 +110,11 @@ function M.files(opts)
   vim.env.FZF_PROJECT_CWD = cwd
 
   -- 3. File command
+  -- Plain git ls-files: fast (22ms, reads git index only).
+  -- Deleted files are filtered by the stat() check in the custom fzf binary.
+  -- Untracked new files are streamed by a parallel goroutine in the binary
+  -- (git ls-files --others --exclude-standard), so they appear progressively
+  -- without blocking the initial open.
   local is_git = #vim.fs.find(".git", { upward = true, stop = vim.loop.os_homedir() }) > 0
   local cmd
   if is_git then
