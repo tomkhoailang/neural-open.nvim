@@ -48,12 +48,13 @@ local function _rebuild_untracked(cwd)
   )
 end
 
--- Invalidate cache and proactively rebuild when the user switches back to nvim
--- or changes directory — so the cache is warm before the picker is opened.
+-- Invalidate cache and proactively rebuild when the user switches back to nvim,
+-- changes directory, or writes/deletes a buffer — so the cache is warm before
+-- the picker is opened, and immediately registers new/deleted files.
 local function _setup_untracked_watchers()
   if _untracked.ready then return end
   _untracked.ready = true
-  vim.api.nvim_create_autocmd({ "FocusGained", "DirChanged" }, {
+  vim.api.nvim_create_autocmd({ "FocusGained", "DirChanged", "BufWritePost", "BufDelete" }, {
     callback = function()
       _untracked.files = nil
       _rebuild_untracked(vim.fn.getcwd())
