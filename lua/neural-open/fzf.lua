@@ -13,6 +13,54 @@ local function is_in_cwd(path, cwd)
   return path:sub(1, #cwd + 1) == cwd .. "/"
 end
 
+-- ---------------------------------------------------------------------------
+-- Untracked file cache
+-- Lives at module level so it persists across M.files() calls for the whole
+-- nvim session. The binary reads FZF_UNTRACKED_FILES and pushes items
+-- synchronously (instant), falling back to its own goroutine when empty.
+-- ---------------------------------------------------------------------------
+local _untracked = {
+  cwd   = nil,   -- cwd the cache was built for
+  files = nil,   -- array of relative paths, nil = not yet cached
+  busy  = false, -- async rebuild currently running
+  ready = false, -- autocmds registered
+}
+
+local function _rebuild_untracked(cwd)
+  if _untracked.busy then return end
+  _untracked.busy = true
+  vim.system(
+    { "git", "ls-files", "--others", "--exclude-standard" },
+    { text = true, cwd = cwd },
+    vim.schedule_wrap(function(obj)
+      _untracked.busy = false
+      if obj.code == 0 and obj.stdout then
+        local files = {}
+        for line in obj.stdout:gmatch("[^\n]+") do
+          if line ~= "" then
+            table.insert(files, line)
+          end
+        end
+        _untracked.cwd   = cwd
+        _untracked.files = files
+      end
+    end)
+  )
+end
+
+-- Invalidate cache and proactively rebuild when the user switches back to nvim
+-- or changes directory — so the cache is warm before the picker is opened.
+local function _setup_untracked_watchers()
+  if _untracked.ready then return end
+  _untracked.ready = true
+  vim.api.nvim_create_autocmd({ "FocusGained", "DirChanged" }, {
+    callback = function()
+      _untracked.files = nil
+      _rebuild_untracked(vim.fn.getcwd())
+    end,
+  })
+end
+
 function M.files(opts)
   opts = opts or {}
   local fzf = require("fzf-lua")
@@ -109,12 +157,21 @@ function M.files(opts)
   vim.env.FZF_NEURAL_WEIGHTS_FILE = weights_file
   vim.env.FZF_PROJECT_CWD = cwd
 
+  -- Untracked cache: set up watchers on first call, rebuild if stale,
+  -- and pass cached files to the binary via env var (instant).
+  -- Empty string → binary falls back to its own goroutine (cold-cache path).
+  _setup_untracked_watchers()
+  if _untracked.cwd ~= cwd or _untracked.files == nil then
+    _rebuild_untracked(cwd) -- async; result ready for the NEXT open
+    vim.env.FZF_UNTRACKED_FILES = ""
+  else
+    vim.env.FZF_UNTRACKED_FILES = table.concat(_untracked.files, ";")
+  end
+
   -- 3. File command
-  -- Plain git ls-files: fast (22ms, reads git index only).
-  -- Deleted files are filtered by the stat() check in the custom fzf binary.
-  -- Untracked new files are streamed by a parallel goroutine in the binary
-  -- (git ls-files --others --exclude-standard), so they appear progressively
-  -- without blocking the initial open.
+  -- Phase 1: plain git ls-files (22ms). Deleted files are filtered by stat()
+  -- in the binary. Untracked files come from FZF_UNTRACKED_FILES (cached,
+  -- instant) or fall back to a background goroutine in the binary on cold cache.
   local is_git = #vim.fs.find(".git", { upward = true, stop = vim.loop.os_homedir() }) > 0
   local cmd
   if is_git then
