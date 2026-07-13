@@ -48,16 +48,76 @@ local function _rebuild_untracked(cwd)
   )
 end
 
+local _watcher = nil
+local _debounce_timer = nil
+
+local function _stop_watcher()
+  if _watcher then
+    pcall(function() _watcher:stop() end)
+    _watcher = nil
+  end
+  if _debounce_timer then
+    pcall(function() _debounce_timer:stop() end)
+    _debounce_timer = nil
+  end
+end
+
+local function _start_watcher(cwd)
+  _stop_watcher()
+  if not cwd or cwd == "" then return end
+
+  local uv = vim.uv or vim.loop
+  local watcher, err = uv.new_fs_event()
+  if not watcher then return end
+  _watcher = watcher
+
+  watcher:start(cwd, { recursive = true }, vim.schedule_wrap(function(watcher_err, filename, events)
+    if watcher_err then
+      _stop_watcher()
+      return
+    end
+
+    -- Ignore changes in .git and node_modules to avoid thrashing
+    if filename then
+      local norm = filename:gsub("\\", "/")
+      if norm:match("^%.git/") or norm:match("^node_modules/") then
+        return
+      end
+    end
+
+    -- Invalidate the cache immediately so next picker open is guaranteed fresh
+    _untracked.files = nil
+
+    -- Debounce the async rebuild of the cache (300ms)
+    if _debounce_timer then
+      _debounce_timer:stop()
+    else
+      _debounce_timer = uv.new_timer()
+    end
+    _debounce_timer:start(300, 0, vim.schedule_wrap(function()
+      _rebuild_untracked(cwd)
+    end))
+  end))
+end
+
 -- Invalidate cache and proactively rebuild when the user switches back to nvim,
--- changes directory, or writes/deletes a buffer — so the cache is warm before
--- the picker is opened, and immediately registers new/deleted files.
+-- changes directory, or when files change on disk (via fs_event watcher).
 local function _setup_untracked_watchers()
   if _untracked.ready then return end
   _untracked.ready = true
-  vim.api.nvim_create_autocmd({ "FocusGained", "DirChanged", "BufWritePost", "BufDelete" }, {
-    callback = function()
+
+  local initial_cwd = vim.fn.getcwd()
+  _start_watcher(initial_cwd)
+
+  vim.api.nvim_create_autocmd({ "FocusGained", "DirChanged" }, {
+    callback = function(args)
+      local current_cwd = vim.fn.getcwd()
       _untracked.files = nil
-      _rebuild_untracked(vim.fn.getcwd())
+      _rebuild_untracked(current_cwd)
+
+      if args.event == "DirChanged" then
+        _start_watcher(current_cwd)
+      end
     end,
   })
 end
