@@ -168,7 +168,7 @@ function M.files(opts)
   end
   table.sort(sorted_mru, function(a, b) return a.rank < b.rank end)
   for _, item in ipairs(sorted_mru) do
-    if is_in_cwd(item.path, cwd) then
+    if is_in_cwd(item.path, cwd) and vim.uv.fs_stat(item.path) then
       table.insert(mru_list, item.path)
     end
   end
@@ -180,7 +180,7 @@ function M.files(opts)
   end
   local trans_list = {}
   for path, score in pairs(transition_scores) do
-    if is_in_cwd(path, cwd) then
+    if is_in_cwd(path, cwd) and vim.uv.fs_stat(path) then
       table.insert(trans_list, path .. ":" .. tostring(score))
     end
   end
@@ -195,9 +195,11 @@ function M.files(opts)
       for path, deadline in pairs(frecency_inst.cache) do
         if is_in_cwd(path, cwd) then
           local norm_path = path_mod.normalize(path)
-          local raw = frecency_inst:to_score(deadline)
-          local norm = frecency_mod.normalize_transition(raw, 8)
-          table.insert(frec_list, norm_path .. ":" .. tostring(norm))
+          if vim.uv.fs_stat(norm_path) then
+            local raw = frecency_inst:to_score(deadline)
+            local norm = frecency_mod.normalize_transition(raw, 8)
+            table.insert(frec_list, norm_path .. ":" .. tostring(norm))
+          end
         end
       end
     end
@@ -236,7 +238,11 @@ function M.files(opts)
   local is_git = #vim.fs.find(".git", { upward = true, stop = vim.loop.os_homedir() }) > 0
   local cmd
   if is_git then
-    cmd = "git ls-files"
+    if vim.fn.executable("awk") == 1 then
+      cmd = "(git ls-files -d && echo \"__END__\" && git ls-files) | awk 'BEGIN{f=0} $0==\"__END__\"{f=1;next} f==0{d[$0]=1;next} f==1{if(!(d[$0]))print}'"
+    else
+      cmd = "git ls-files"
+    end
   elseif vim.fn.executable("fd") == 1 then
     cmd = "fd --type f --hidden --follow --exclude .git"
   else
